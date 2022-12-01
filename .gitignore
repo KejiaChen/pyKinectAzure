@@ -1,3 +1,4 @@
 
 *.pyc
 examples/outputImage.jpg
+.history/
