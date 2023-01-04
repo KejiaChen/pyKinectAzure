@@ -20,7 +20,7 @@ import fastdlo.proc.utils as utils
 class Pipeline():
 
 
-    def __init__(self, checkpoint_siam, checkpoint_seg=None, img_w = 640, img_h = 480, colorRange = None):
+    def __init__(self, checkpoint_siam, checkpoint_seg=None, img_w = 640, img_h = 480, colorRange = None, is_interpolation=False):
 
         self.network = NN(device="gpu", checkpoint_path=checkpoint_siam)
         ##############################################
@@ -33,7 +33,9 @@ class Pipeline():
         else:
             self.colorRange = None
             # self.colorFilter.colorRange = [((156,43,46),(180,255,255))] # by default detect red color items
-    
+        # interpolation request? by default False
+        self.activate_interpolation = is_interpolation
+        
         if checkpoint_seg is not None:
             self.network_seg = SegNet(model_name="deeplabv3plus_resnet101", checkpoint_path=checkpoint_seg, img_w=img_w, img_h=img_h)
         else:
@@ -63,7 +65,7 @@ class Pipeline():
             ret, gray_msk_img = cv2.threshold(gray_img, 10, 255, cv2.THRESH_BINARY_INV)
             # cv2.imshow("Filtered Gray", gray_msk_img)
             backtorgb = cv2.cvtColor(gray_msk_img,cv2.COLOR_GRAY2RGB)
-            cv2.imshow("Filtered Gray Color", gray_msk_img)
+            cv2.imshow("Filtered Gray Color", backtorgb)
             
             mask_img = self.network_seg.predict_img(color_filtered_img)
         else:
@@ -77,7 +79,7 @@ class Pipeline():
 
         seg_time = (arrow.utcnow() - t0).total_seconds() * 1000
 
-        img_out, dlo_mask_pointSet, dlo_path, times = self.process(source_img=source_img, mask_img=mask_img, mask_th=mask_th)
+        img_out, dlo_mask_pointSet, dlo_path,times = self.process(source_img=source_img, mask_img=mask_img, mask_th=mask_th)
 
         times["seg_time"] = seg_time
 
@@ -196,13 +198,18 @@ class Pipeline():
         modified by Y.Meng
         reunion the color mask and path
         '''
-        dlo_mask_pointSet, dlo_path = self.merge_dict(spline_dict=splines, path_final=paths_final)
-        
+        dlo_mask_pointSet = self.merge_dict(spline_dict=splines)
+        dlo_path = self.pathConnection(paths_final)
 
-        return colored_mask, dlo_mask_pointSet, dlo_path, times
+        # add linear interpolation function
+        if self.activate_interpolation:
+            interpolated_dlo_path = self.pathInterpolation(dlo_path)
+            return colored_mask, dlo_mask_pointSet, interpolated_dlo_path, times
+        else:
+            return colored_mask, dlo_mask_pointSet, dlo_path, times
     
 
-    def merge_dict(self, spline_dict = None, path_final = None):
+    def merge_dict(self, spline_dict = None):
         '''
         Developed by Y.Meng
         merge the nested spline dict or final path dict
@@ -213,20 +220,123 @@ class Pipeline():
             points_spline = []
 
             for idx, dict in enumerate(spline_dict.items()):
-                temp = dict[1]
-                for pos_pair in temp['points']:
-                    points_spline.append(pos_pair)
+                points_spline.extend(dict[1]['points'])
+
+
+        return points_spline
+
+    def pathInterpolation(self, data):
+            '''
+            developed by Y.Meng, :
+            use linear interpolation to fill the vacancy of DLO path 
+            '''
+            count_interpolation = 0
+            for i in range(len(data)):
+                pos = data[i]
+                # exclude both endes for interpolation
+                if i != 0 and i != len(data)-1:
+                    pos2 = data[i+1]
+                    # detect whether the points in between far away, if not, then connect them with line segment
+                    length = np.sqrt(((pos[0]-pos2[0])**2)+((pos[1]-pos2[1])**2))
+                    # Notation the closest point distance is about 5, so the interpolated points vancancy should be at least 10
+                    if length >= 10:
+                        # calculate the number of points should be interpolated
+                        num_interpolation = int(length / 5 - 1)
+                        assert num_interpolation > 0
+                        count_interpolation = count_interpolation + num_interpolation
+                        
+                        x = [pos[0], pos2[0]]
+                        y = [pos[1], pos2[1]]
+                        # find linear fitting curve
+                        a, b = np.polyfit(x, y, deg=1)
+                        
+                        for idx in range(num_interpolation):
+                            # calculate interpolation points
+                            x_interpolate = pos[0] + (pos2[0] - pos[0])*((num_interpolation - idx)/(num_interpolation+1))
+                            y_interpolate = a * x_interpolate + b
+                            data.insert(i+1,np.array([int(x_interpolate), int(y_interpolate)]))
+                        
+                    else:
+                        pass
+                else:
+                    pos2 = None
+            
+            print("interpolation in total:", count_interpolation)
+            return data
+
+            
+    def pathConnection(self, paths_dict):
+        '''
+        developed by Y.Meng, used to connect the path line lists
+        basic idea is K-Nearest Neighboor where K == 1
         
-        # merged the path_final nested dict into one dict instance
-        if path_final != None:
-            points_path = []
+        '''
+        points_path = []
 
-            for idx, dict in enumerate(path_final.items()):
-                temp = dict[1]
-                for pos_pair in temp['points']:
-                    points_path.append(pos_pair)
+        for i, item in enumerate(paths_dict.values()):
+            points_path.append(item['points'])
+        
+        spline_num = len(points_path)
 
-        return points_spline, points_path
+        if spline_num == 1:
+            return points_path[0]
+        elif spline_num == 0:
+            points_path.append(np.array([0,0]))
+            return points_path
+        else:
+            count = spline_num - 1
+            # take the first spline
+            final_path = points_path[0]
+
+            while count > 0:
+                # get the first col path head and tail, use it as reference
+                head = final_path[0]
+                tail = final_path[-1]
+                # create 4 maps to compute and save the distances btw heads and tails
+                map1 = [] # ref head to others tails
+                map2 = [] # ref tail to others heads
+                map3 = [] # ref head to others heads
+                map4 = [] # ref tail to others tails
+                # calculate the closest distance btw head & tail to the first spline, and find smallest one
+                for path in points_path[1:]:
+                    son_head = path[0]
+                    son_tail = path[-1]
+                    # calculate the distance in between
+                    length1 = np.sqrt(((son_tail[0]-head[0])**2)+((son_tail[1]-head[1])**2))
+                    length2 = np.sqrt(((son_head[0]-tail[0])**2)+((son_head[1]-tail[1])**2))
+                    length3 = np.sqrt(((son_head[0]-head[0])**2)+((son_head[1]-head[1])**2))
+                    length4 = np.sqrt(((son_tail[0]-tail[0])**2)+((son_tail[1]-tail[1])**2))
+                    map1.append(length1)
+                    map2.append(length2)
+                    map3.append(length3)
+                    map4.append(length4)
+                
+                map = np.array([map1,map2,map3,map4])
+                h,w = map.shape
+                pos = map.argmin()
+                idx_row, idx_col = pos // w, pos % w
+                # find closest distance and its connection position
+                if idx_row == 0: # head to tail
+                    points_path[idx_col+1].extend(points_path[0])
+                    final_path = points_path[idx_col+1]
+
+                elif idx_row == 1: # tail to head
+                    final_path.extend(points_path[idx_col+1])
+
+                elif idx_row == 2: # head to head
+                    points_path[idx_col+1].reverse() # reverse the list series !
+                    points_path[idx_col+1].extend(points_path[0])
+                    final_path = points_path[idx_col+1]
+
+                else: # tail to tail
+                    points_path[idx_col+1].reverse()
+                    final_path.extend(points_path[idx_col+1])
+                
+                points_path[0] = final_path
+                del points_path[idx_col+1]
+                count -= 1
+                
+        return final_path
 
 
     def solveIntersections(self, preds_sorted, nodes, vertices_dict, debug=False):

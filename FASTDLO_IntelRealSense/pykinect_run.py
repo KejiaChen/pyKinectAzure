@@ -40,8 +40,9 @@ if __name__ == "__main__":
 	# Set up the parameters #
 	#########################
 	'''
-	# YOU MIGHT NEED TO TOUCH THIS PARAMETERS!
-	'''
+    ########################################################################################
+    # YOU MIGHT NEED TO TOUCH THESE PARAMETERS!
+    '''
 	IMG_COLOR_SIZE = [1080, 1920, 3]
 	IMG_ROI_SIZE = [451, 440, 3]
 	MASK_RED = {"lower": np.array([0, 70, 70]),
@@ -58,6 +59,10 @@ if __name__ == "__main__":
     ]
 	R = np.array([[0,1],[1,0]]) # Rotation matrix for coordinate fitting
 	Distance_threshold = 60 # distance detection threshold
+	INTERPOLATION = True
+	'''
+    #######################################################################################
+    '''
 	
 	# weighting file name - NO NEED TO TOUCH
 	ckpt_siam_name = "CP_similarity.pth"
@@ -68,7 +73,7 @@ if __name__ == "__main__":
 	checkpoint_siam = os.path.join(script_path, "FASTDLO_IntelRealSense/weights/" + ckpt_siam_name)
 	checkpoint_seg = os.path.join(script_path, "FASTDLO_IntelRealSense/weights/" + ckpt_seg_name)
 	# load FASTDLO algorithm pipeline - NO NEED TO TOUCH
-	p = Pipeline(checkpoint_siam=checkpoint_siam, checkpoint_seg=checkpoint_seg, img_w=IMG_COLOR_SIZE[1], img_h=IMG_COLOR_SIZE[0], colorRange=COLOR_RANGE)
+	p = Pipeline(checkpoint_siam=checkpoint_siam, checkpoint_seg=checkpoint_seg, img_w=IMG_COLOR_SIZE[1], img_h=IMG_COLOR_SIZE[0], colorRange=COLOR_RANGE, is_interpolation=INTERPOLATION)
 	# p_roi = Pipeline(checkpoint_siam=checkpoint_siam, checkpoint_seg=checkpoint_seg, img_w=IMG_ROI_SIZE[1], img_h=IMG_ROI_SIZE[0])
 	
 	# Initialize the library, if the library is not found, add the library path as argument
@@ -80,6 +85,11 @@ if __name__ == "__main__":
 
 	# Start device
 	device = pykinect.start_device(config=device_config)
+	
+	# calibration
+	calibration = device.calibration
+	intrinsic_parameters = calibration.get_matrix(camera='color')
+	distortion_coefficients = calibration.get_distortion(camera='color')
  
  	# Aruco Detector
 	roi_detector = ArucoDetector("DICT_5X5_50")
